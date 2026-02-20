@@ -38,7 +38,15 @@ class Rc<T extends { drop(): void }> {
   }
 }
 
-export function createStreamer(postgres: Sql, drizzle: Drizzle): Streamer {
+export type PostgresStreamer = Streamer & {
+  /** Unlisten from the LISTEN subscription and release resources. */
+  close(): Promise<void>;
+};
+
+export function createStreamer(
+  postgres: Sql,
+  drizzle: Drizzle
+): PostgresStreamer {
   const ulid = monotonicFactory();
   const events = new EventEmitter<{
     [key: `strm:${string}`]: [StreamChunkEvent];
@@ -59,7 +67,7 @@ export function createStreamer(postgres: Sql, drizzle: Drizzle): Streamer {
   };
 
   const STREAM_TOPIC = 'workflow_event_chunk';
-  postgres.listen(STREAM_TOPIC, async (msg) => {
+  const listenSubscription = postgres.listen(STREAM_TOPIC, async (msg) => {
     const parsed = await Promise.resolve(msg)
       .then(JSON.parse)
       .then(StreamPublishMessage.parse);
@@ -87,6 +95,10 @@ export function createStreamer(postgres: Sql, drizzle: Drizzle): Streamer {
     });
   });
 
+  // Helper to convert chunk to Buffer
+  const toBuffer = (chunk: string | Uint8Array): Buffer =>
+    !Buffer.isBuffer(chunk) ? Buffer.from(chunk) : chunk;
+
   return {
     async writeToStream(
       name: string,
@@ -101,7 +113,7 @@ export function createStreamer(postgres: Sql, drizzle: Drizzle): Streamer {
         chunkId,
         streamId: name,
         runId,
-        chunkData: !Buffer.isBuffer(chunk) ? Buffer.from(chunk) : chunk,
+        chunkData: toBuffer(chunk),
         eof: false,
       });
       postgres.notify(
@@ -113,6 +125,44 @@ export function createStreamer(postgres: Sql, drizzle: Drizzle): Streamer {
           })
         )
       );
+    },
+
+    async writeToStreamMulti(
+      name: string,
+      _runId: string | Promise<string>,
+      chunks: (string | Uint8Array)[]
+    ) {
+      if (chunks.length === 0) return;
+
+      // Generate all chunk IDs up front to preserve ordering
+      const chunkIds = chunks.map(() => genChunkId());
+
+      // Await runId if it's a promise to ensure proper flushing
+      const runId = await _runId;
+
+      // Batch insert all chunks in a single query
+      await drizzle.insert(streams).values(
+        chunks.map((chunk, i) => ({
+          chunkId: chunkIds[i],
+          streamId: name,
+          runId,
+          chunkData: toBuffer(chunk),
+          eof: false,
+        }))
+      );
+
+      // Notify for each chunk (could be batched in future if needed)
+      for (const chunkId of chunkIds) {
+        postgres.notify(
+          STREAM_TOPIC,
+          JSON.stringify(
+            StreamPublishMessage.encode({
+              chunkId,
+              streamId: name,
+            })
+          )
+        );
+      }
     },
     async closeStream(
       name: string,
@@ -218,6 +268,11 @@ export function createStreamer(postgres: Sql, drizzle: Drizzle): Streamer {
         .where(eq(streams.runId, runId));
 
       return results.map((r) => r.streamId);
+    },
+
+    async close() {
+      const sub = await listenSubscription;
+      await sub.unlisten();
     },
   };
 }

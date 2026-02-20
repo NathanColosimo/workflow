@@ -23,10 +23,15 @@ import type { PostgresWorldConfig } from './config.js';
  * we can reuse the local world, mix and match worlds to build
  * hybrid architectures, and even migrate between worlds.
  */
+export type PostgresQueue = Queue & {
+  start(): Promise<void>;
+  close(): Promise<void>;
+};
+
 export function createQueue(
   boss: PgBoss,
   config: PostgresWorldConfig
-): Queue & { start(): Promise<void> } {
+): PostgresQueue {
   const port = process.env.PORT ? Number(process.env.PORT) : undefined;
   const localWorld = createLocalWorld({ dataDir: undefined, port });
 
@@ -106,6 +111,9 @@ export function createQueue(
       );
       const message = QueuePayloadSchema.parse(body);
       const queueName = `${queue}${messageData.id}` as const;
+      // TODO: Custom headers from opts.headers are not propagated into MessageData.
+      // To support this, MessageData schema would need to include a headers field
+      // and the headers would need to be stored/retrieved from pg-boss job data.
       await localWorld.queue(queueName, message, {
         idempotencyKey: messageData.idempotencyKey,
       });
@@ -128,6 +136,9 @@ export function createQueue(
     async start() {
       boss = await boss.start();
       await setupListeners();
+    },
+    async close() {
+      await localWorld.close?.();
     },
   };
 }

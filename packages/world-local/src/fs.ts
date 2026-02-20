@@ -9,6 +9,39 @@ const ulid = monotonicFactory(() => Math.random());
 
 const Ulid = z.string().ulid();
 
+const isWindows = process.platform === 'win32';
+
+/**
+ * Execute a filesystem operation with retry logic on Windows.
+ * On Windows, file operations can fail with EPERM/EBUSY/EACCES when files
+ * are briefly locked by another process or antivirus. This wrapper adds
+ * exponential backoff retry logic. On non-Windows platforms, executes directly.
+ */
+async function withWindowsRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 5
+): Promise<T> {
+  if (!isWindows) return fn();
+
+  const retryableErrors = ['EPERM', 'EBUSY', 'EACCES'];
+  const baseDelayMs = 10;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      const isRetryable =
+        attempt < maxRetries && retryableErrors.includes(error.code);
+      if (!isRetryable) throw error;
+      // Exponential backoff with jitter
+      const delay = baseDelayMs * 2 ** attempt + Math.random() * baseDelayMs;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  // TypeScript: unreachable, but satisfies return type
+  throw new Error('Retry loop exited unexpectedly');
+}
+
 // In-memory cache of created files to avoid expensive fs.access() calls
 // This is safe because we only write once per file path (no overwrites without explicit flag)
 const createdFilesCache = new Set<string>();
@@ -41,12 +74,41 @@ interface WriteOptions {
   overwrite?: boolean;
 }
 
+/**
+ * Custom JSON replacer that encodes Uint8Array as base64 strings.
+ * Format: { __type: 'Uint8Array', data: '<base64>' }
+ */
+function jsonReplacer(_key: string, value: unknown): unknown {
+  if (value instanceof Uint8Array) {
+    return {
+      __type: 'Uint8Array',
+      data: Buffer.from(value).toString('base64'),
+    };
+  }
+  return value;
+}
+
+/**
+ * Custom JSON reviver that decodes base64 strings back to Uint8Array.
+ */
+function jsonReviver(_key: string, value: unknown): unknown {
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    (value as any).__type === 'Uint8Array' &&
+    typeof (value as any).data === 'string'
+  ) {
+    return new Uint8Array(Buffer.from((value as any).data, 'base64'));
+  }
+  return value;
+}
+
 export async function writeJSON(
   filePath: string,
   data: any,
   opts?: WriteOptions
 ): Promise<void> {
-  return write(filePath, JSON.stringify(data, null, 2), opts);
+  return write(filePath, JSON.stringify(data, jsonReplacer, 2), opts);
 }
 
 /**
@@ -96,13 +158,13 @@ export async function write(
     await ensureDir(path.dirname(filePath));
     await fs.writeFile(tempPath, data);
     tempFileCreated = true;
-    await fs.rename(tempPath, filePath);
+    await withWindowsRetry(() => fs.rename(tempPath, filePath));
     // Track this file in cache so future writes know it exists
     createdFilesCache.add(filePath);
   } catch (error) {
     // Only try to clean up temp file if it was actually created
     if (tempFileCreated) {
-      await fs.unlink(tempPath).catch(() => {});
+      await withWindowsRetry(() => fs.unlink(tempPath), 3).catch(() => {});
     }
     throw error;
   }
@@ -114,7 +176,7 @@ export async function readJSON<T>(
 ): Promise<T | null> {
   try {
     const content = await fs.readFile(filePath, 'utf-8');
-    return decoder.parse(JSON.parse(content));
+    return decoder.parse(JSON.parse(content, jsonReviver));
   } catch (error) {
     if ((error as any).code === 'ENOENT') return null;
     throw error;
@@ -135,11 +197,18 @@ export async function deleteJSON(filePath: string): Promise<void> {
 }
 
 export async function listJSONFiles(dirPath: string): Promise<string[]> {
+  return listFilesByExtension(dirPath, '.json');
+}
+
+export async function listFilesByExtension(
+  dirPath: string,
+  extension: string
+): Promise<string[]> {
   try {
     const files = await fs.readdir(dirPath);
     return files
-      .filter((f) => f.endsWith('.json'))
-      .map((f) => f.replace('.json', ''));
+      .filter((f) => f.endsWith(extension))
+      .map((f) => f.slice(0, -extension.length));
   } catch (error) {
     if ((error as any).code === 'ENOENT') return [];
     throw error;

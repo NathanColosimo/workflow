@@ -1,134 +1,932 @@
-# Workflow directives specification
+# Workflow Directives Specification
 
-The 'use step' and 'use workflow' directives works similarly to the 'use server' in react. A function marked with 'use step' will be bundled and executed on the server. A function marked as 'use workflow' will also be bundled and executed on the server in an alternate v8 runtime.
+The `"use step"` and `"use workflow"` directives work similarly to `"use server"` in React. A function marked with `"use step"` represents a durable step that executes on the server. A function marked with `"use workflow"` represents a durable workflow that orchestrates steps.
 
-The swc plugin has 3 modes - 'step' mode, 'workflow' mode, and 'client' mode
+The SWC plugin has 3 modes: **Step mode**, **Workflow mode**, and **Client mode**.
+
+## Directive Placement
+
+Directives can be placed:
+1. At the **top of a file** (module-level) to mark all exported async functions
+2. At the **start of a function body** to mark individual functions
+
+Directives must:
+- Be at the very beginning (above any other code, including imports for module-level)
+- Use single or double quotes (not backticks)
+- Comments before directives are allowed
+
+## JSON Manifest
+
+All modes emit a JSON manifest comment at the top of the file containing metadata about discovered workflows, steps, and classes with custom serialization:
+
+```javascript
+/**__internal_workflows{"workflows":{"path/file.ts":{"myWorkflow":{"workflowId":"workflow//./path/file//myWorkflow"}}},"steps":{"path/file.ts":{"myStep":{"stepId":"step//./path/file//myStep"}}},"classes":{"path/file.ts":{"Point":{"classId":"class//./path/file//Point"}}}}*/
+```
+
+The manifest includes:
+- **`workflows`**: Map of workflow function names to their `workflowId`
+- **`steps`**: Map of step function names to their `stepId`
+- **`classes`**: Map of class names with custom serialization to their `classId`
+
+This manifest is used by bundlers and the runtime to discover and register workflows, steps, and serializable classes.
+
+## ID Generation
+
+IDs use the format `{type}//{modulePath}//{identifier}` where:
+- `type` is `workflow`, `step`, or `class`
+- `modulePath` is either:
+  - A **module specifier** with version (e.g., `point@0.0.1`, `@myorg/shared@1.2.3`, `workflow/internal/builtins@4.0.0`) when provided via plugin config
+  - A **relative path** prefixed with `./` (e.g., `./src/jobs/order`) when no specifier is provided
+- `identifier` is the function/class name, with nested functions using `/` separators
+
+### Module Specifier Support
+
+The plugin accepts an optional `moduleSpecifier` config option that allows IDs to be based on the 
+import specifier rather than the file path. This is useful for:
+
+1. **Package exports conditions**: When a package has different entrypoints for different conditions 
+   (e.g., `"workflow"` vs `"default"` in `package.json` exports), the same import specifier 
+   can map to different files. Using the specifier ensures consistent IDs across conditions.
+
+2. **Versioned IDs**: Package specifiers can include versions (e.g., `point@0.0.1`) for cache invalidation.
+
+3. **Stable cross-bundle references**: Classes serialized in one bundle can be deserialized in another 
+   bundle as long as both use the same module specifier.
+
+4. **Subpath exports**: For packages with multiple entry points (e.g., `workflow/internal/builtins`), 
+   the full subpath is included in the module specifier to avoid collisions between steps with the 
+   same name in different subpaths.
+
+**Plugin Config:**
+```json
+{
+  "mode": "step",
+  "moduleSpecifier": "workflow/internal/builtins@4.0.0"
+}
+```
+
+### Examples
+
+**With module specifier (npm package root export):**
+- `class//point@0.0.1//Point`
+- `step//@myorg/tasks@2.0.0//processOrder`
+
+**With module specifier (npm package subpath export):**
+- `step//workflow/internal/builtins@4.0.0//__builtin_response_json`
+- `class//@myorg/shared/models@1.0.0//User`
+
+**Without module specifier (local files):**
+- `workflow//./src/jobs/order//processOrder`
+- `step//./src/jobs/order//fetchData`
+- `step//./src/jobs/order//processOrder/innerStep` (nested step)
+- `step//./src/jobs/order//MyClass.staticMethod` (static method)
+- `step//./src/jobs/order//MyClass#instanceMethod` (instance method)
+- `class//./src/models/Point//Point` (serialization class)
+
+Note: File extensions are stripped from local paths for cleaner IDs.
+
+---
 
 ## Step Mode
 
-When executed in 'step' mode, step definitions is kept as is and are simply registered using `registerStepFunction` from `workflow/internal/private`. The directives are removed. For example:
+In step mode, step function bodies are kept intact and registered using `registerStepFunction` from `workflow/internal/private`. Workflow functions throw an error if called directly (since they should only run in the workflow runtime).
 
-Input code:
+### Basic Step Function
 
-```
+Input:
+```javascript
 export async function add(a, b) {
   "use step";
-  return a + b
+  return a + b;
 }
 ```
 
-Output code
-
+Output:
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+/**__internal_workflows{"steps":{"input.js":{"add":{"stepId":"step//./input//add"}}}}*/;
+export async function add(a, b) {
+    return a + b;
+}
+registerStepFunction("step//./input//add", add);
 ```
-import { registerStepFunction } from "workflow/internal/private"
+
+### Arrow Function Step
+
+Input:
+```javascript
+export const multiply = async (a, b) => {
+  "use step";
+  return a * b;
+};
+```
+
+Output:
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+/**__internal_workflows{"steps":{"input.js":{"multiply":{"stepId":"step//./input//multiply"}}}}*/;
+export const multiply = async (a, b) => {
+    return a * b;
+};
+registerStepFunction("step//./input//multiply", multiply);
+```
+
+### Workflow Functions in Step Mode
+
+Workflow functions throw an error to prevent direct execution and have `workflowId` attached:
+
+Input:
+```javascript
+export async function myWorkflow(data) {
+  "use workflow";
+  return await processData(data);
+}
+```
+
+Output:
+```javascript
+/**__internal_workflows{"workflows":{"input.js":{"myWorkflow":{"workflowId":"workflow//./input//myWorkflow"}}}}*/;
+export async function myWorkflow(data) {
+    throw new Error("You attempted to execute workflow myWorkflow function directly. To start a workflow, use start(myWorkflow) from workflow/api");
+}
+myWorkflow.workflowId = "workflow//./input//myWorkflow";
+```
+
+### Nested Steps in Workflows
+
+Steps defined inside workflow functions are hoisted to module level with prefixed names:
+
+Input:
+```javascript
+export async function example(a, b) {
+  "use workflow";
+
+  async function innerStep(x, y) {
+    "use step";
+    return x + y;
+  }
+
+  return await innerStep(a, b);
+}
+```
+
+Output:
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+/**__internal_workflows{"workflows":{"input.js":{"example":{"workflowId":"workflow//./input//example"}}},"steps":{"input.js":{"innerStep":{"stepId":"step//./input//innerStep"}}}}*/;
+async function example$innerStep(x, y) {
+    return x + y;
+}
+export async function example(a, b) {
+    throw new Error("You attempted to execute workflow example function directly. To start a workflow, use start(example) from workflow/api");
+}
+example.workflowId = "workflow//./input//example";
+registerStepFunction("step//./input//example/innerStep", example$innerStep);
+```
+
+### Steps in Nested Object Properties
+
+Step functions can be defined inside deeply nested object properties, including function call arguments. The plugin recursively processes nested objects to find step functions, generating compound paths for the step IDs.
+
+Input:
+```javascript
+import { agent } from "experimental-agent";
+
+export const vade = agent({
+  tools: {
+    VercelRequest: {
+      execute: async (input, ctx) => {
+        "use step";
+        return 1 + 1;
+      },
+    },
+  },
+});
+```
+
+Output (Step Mode):
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+import { agent } from "experimental-agent";
+/**__internal_workflows{"steps":{"input.js":{"vade/tools/VercelRequest/execute":{"stepId":"step//./input//vade/tools/VercelRequest/execute"}}}}*/;
+var vade$tools$VercelRequest$execute = async function(input, ctx) {
+    return 1 + 1;
+};
+export const vade = agent({
+    tools: {
+        VercelRequest: {
+            execute: vade$tools$VercelRequest$execute
+        }
+    }
+});
+registerStepFunction("step//./input//vade/tools/VercelRequest/execute", vade$tools$VercelRequest$execute);
+```
+
+Note: Step functions are hoisted as regular function expressions (not arrow functions) to preserve `this` binding when called with `.call()` or `.apply()`. This applies even when the original step function was defined as an arrow function.
+
+Output (Workflow Mode):
+```javascript
+import { agent } from "experimental-agent";
+/**__internal_workflows{"steps":{"input.js":{"vade/tools/VercelRequest/execute":{"stepId":"step//./input//vade/tools/VercelRequest/execute"}}}}*/;
+export const vade = agent({
+    tools: {
+        VercelRequest: {
+            execute: globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step//./input//vade/tools/VercelRequest/execute")
+        }
+    }
+});
+```
+
+Output (Client Mode):
+```javascript
+import { agent } from "experimental-agent";
+/**__internal_workflows{"steps":{"input.js":{"vade/tools/VercelRequest/execute":{"stepId":"step//./input//vade/tools/VercelRequest/execute"}}}}*/;
+var vade$tools$VercelRequest$execute = async function(input, ctx) {
+    return 1 + 1;
+};
+export const vade = agent({
+    tools: {
+        VercelRequest: {
+            execute: vade$tools$VercelRequest$execute
+        }
+    }
+});
+vade$tools$VercelRequest$execute.stepId = "step//./input//vade/tools/VercelRequest/execute";
+```
+
+Note: In client mode, nested object property step functions are hoisted and have `stepId` set directly (no `registerStepFunction` call). The original call site is replaced with a reference to the hoisted variable, same as step mode.
+
+Note: The step ID includes the full path through nested objects (`vade/tools/VercelRequest/execute`), while the hoisted variable name uses `$` as the separator (`vade$tools$VercelRequest$execute`) to create a valid JavaScript identifier.
+
+#### Shorthand Method Syntax
+
+Shorthand method syntax (non-arrow functions) is also supported in nested object properties:
+
+Input:
+```javascript
+import { agent } from "experimental-agent";
+
+export const vade = agent({
+  tools: {
+    VercelRequest: {
+      async execute(input, { experimental_context }) {
+        "use step";
+        return 1 + 1;
+      },
+    },
+  },
+});
+```
+
+Output (Step Mode):
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+import { agent } from "experimental-agent";
+/**__internal_workflows{"steps":{"input.js":{"vade/tools/VercelRequest/execute":{"stepId":"step//./input//vade/tools/VercelRequest/execute"}}}}*/;
+var vade$tools$VercelRequest$execute = async function(input, { experimental_context }) {
+    return 1 + 1;
+};
+export const vade = agent({
+    tools: {
+        VercelRequest: {
+            execute: vade$tools$VercelRequest$execute
+        }
+    }
+});
+registerStepFunction("step//./input//vade/tools/VercelRequest/execute", vade$tools$VercelRequest$execute);
+```
+
+Note: Shorthand methods are hoisted as regular function expressions (not arrow functions) to preserve `this` binding when called with `.call()` or `.apply()`. Closure variables are handled the same way as other step functions.
+
+### Closure Variables
+
+When nested steps capture closure variables, they are extracted using `__private_getClosureVars()`:
+
+Input:
+```javascript
+function wrapper(multiplier) {
+  return async () => {
+    "use step";
+    return 10 * multiplier;
+  };
+}
+```
+
+Output:
+```javascript
+import { __private_getClosureVars, registerStepFunction } from "workflow/internal/private";
+/**__internal_workflows{"steps":{"input.js":{"_anonymousStep0":{"stepId":"step//./input//_anonymousStep0"}}}}*/;
+var wrapper$_anonymousStep0 = async () => {
+    const { multiplier } = __private_getClosureVars();
+    return 10 * multiplier;
+};
+function wrapper(multiplier) {
+    return wrapper$_anonymousStep0;
+}
+registerStepFunction("step//./input//wrapper/_anonymousStep0", wrapper$_anonymousStep0);
+```
+
+### Instance Method Step
+
+Instance methods can use `"use step"` if the class provides custom serialization methods. The `this` context is serialized when calling the step and deserialized before execution.
+
+Input:
+```javascript
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from '@vercel/workflow';
+
+export class Counter {
+  static [WORKFLOW_SERIALIZE](instance) {
+    return { value: instance.value };
+  }
+  static [WORKFLOW_DESERIALIZE](data) {
+    return new Counter(data.value);
+  }
+  constructor(value) {
+    this.value = value;
+  }
+  async add(amount) {
+    'use step';
+    return this.value + amount;
+  }
+}
+```
+
+Output:
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+import { registerSerializationClass } from "workflow/internal/class-serialization";
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from '@vercel/workflow';
+/**__internal_workflows{"steps":{"input.js":{"Counter#add":{"stepId":"step//./input//Counter#add"}}},"classes":{"input.js":{"Counter":{"classId":"class//./input//Counter"}}}}*/;
+export class Counter {
+    static [WORKFLOW_SERIALIZE](instance) {
+        return { value: instance.value };
+    }
+    static [WORKFLOW_DESERIALIZE](data) {
+        return new Counter(data.value);
+    }
+    constructor(value) {
+        this.value = value;
+    }
+    async add(amount) {
+        return this.value + amount;
+    }
+}
+registerStepFunction("step//./input//Counter#add", Counter.prototype["add"]);
+registerSerializationClass("class//./input//Counter", Counter);
+```
+
+Note: Instance methods use `#` in the step ID (e.g., `Counter#add`) and are registered via `ClassName.prototype["methodName"]`.
+
+### Module-Level Directive
+
+Input:
+```javascript
+"use step";
 
 export async function add(a, b) {
-  return a + b
+  return a + b;
 }
-registerStepFunction("step//input.js//add", add)
+
+export async function subtract(a, b) {
+  return a - b;
+}
 ```
 
-**ID Generation:** Step IDs are generated using the format `step//{filepath}//{functionName}`, where:
+Output:
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+/**__internal_workflows{"steps":{"input.js":{"add":{"stepId":"step//./input//add"},"subtract":{"stepId":"step//./input//subtract"}}}}*/;
+export async function add(a, b) {
+    return a + b;
+}
+export async function subtract(a, b) {
+    return a - b;
+}
+registerStepFunction("step//./input//add", add);
+registerStepFunction("step//./input//subtract", subtract);
+```
 
-- `filepath` is the relative path to the file from the project root
-- `functionName` is the name of the step function
-
-Workflow definitions are left untouched in step mode, including leaving the directives intact.
-
-Upstream, a bundler will use this plugin in step mode to create a server bundle of multiple steps and serve it via an API endpoint at `.well-known/workflow/v1/step`
+---
 
 ## Workflow Mode
 
-When executed in workflow mode, step definition bodies are replaced with a `useStep` call, which is a function accessible at the global scope via the `Symbol.for("WORKFLOW_USE_STEP")` symbol. `useStep` encapsulates logic to either make a network request to enqueue the step (which is served from the step bundle created in step mode), or resolves the value from the local event log.
+In workflow mode, step function bodies are replaced with a `globalThis[Symbol.for("WORKFLOW_USE_STEP")]` call. Workflow functions keep their bodies and are registered with `globalThis.__private_workflows.set()`.
 
-Input code
+### Step Functions
 
-```
+Input:
+```javascript
 export async function add(a, b) {
   "use step";
   return a + b;
 }
 ```
 
-Output code
-
-```
-export async function add(a, b) {
-  return globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step//input.js//add")(a, b);
-}
+Output:
+```javascript
+/**__internal_workflows{"steps":{"input.js":{"add":{"stepId":"step//./input//add"}}}}*/;
+export var add = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step//./input//add");
 ```
 
-**ID Generation:** The same step ID format `step//{filepath}//{functionName}` is used when replacing step function bodies.
+### Workflow Functions
 
-Workflow definitions are left untouched in workflow mode, aside from the directive itself being removed and a `workflowId` property being attached.
-
-Input code
-
-```
-export async function example(a, b) {
+Input:
+```javascript
+export async function myWorkflow(data) {
   "use workflow";
-  return a + b;
+  const result = await fetchData(data);
+  return result;
 }
 ```
 
-Output code
-
-```
-export async function example(a, b) {
-  return a + b;
+Output:
+```javascript
+/**__internal_workflows{"workflows":{"input.js":{"myWorkflow":{"workflowId":"workflow//./input//myWorkflow"}}}}*/;
+export async function myWorkflow(data) {
+    const result = await fetchData(data);
+    return result;
 }
-example.workflowId = "workflow//input.js//example";
+myWorkflow.workflowId = "workflow//./input//myWorkflow";
+globalThis.__private_workflows.set("workflow//./input//myWorkflow", myWorkflow);
 ```
 
-**ID Generation:** Workflow IDs are generated using the format `workflow//{filepath}//{functionName}` and attached as a property to the function.
+### Nested Steps with Closures
 
-Upstream, a bundler will use this plugin in workflow mode to create a server bundle of all the workflows and serve it via an API endpoint at `.well-known/workflow/v1/flow`. The workflow endpoint handler encapsulates logic to execute the correct workflow using the function name, which is why nothing needs to be done to the workflows themselves. They just need to be exported.
+When steps capture closure variables, a closure function is passed as the second argument:
+
+Input:
+```javascript
+export async function myWorkflow(config) {
+  "use workflow";
+  let count = 0;
+
+  async function increment() {
+    "use step";
+    return count + 1;
+  }
+
+  return await increment();
+}
+```
+
+Output:
+```javascript
+/**__internal_workflows{"workflows":{"input.js":{"myWorkflow":{"workflowId":"workflow//./input//myWorkflow"}}},"steps":{"input.js":{"increment":{"stepId":"step//./input//increment"}}}}*/;
+export async function myWorkflow(config) {
+    let count = 0;
+    var increment = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step//./input//myWorkflow/increment", () => ({
+        count
+    }));
+    return await increment();
+}
+myWorkflow.workflowId = "workflow//./input//myWorkflow";
+globalThis.__private_workflows.set("workflow//./input//myWorkflow", myWorkflow);
+```
+
+---
 
 ## Client Mode
 
-When executed in 'client' mode, step and workflow definitions have their bodies replaced with a call to `runStep` and throw statements respectively. `runStep` is exported from `workflow/api`. It effectively proxies the requests to execute steps on the server (using the bundles created in the other modes).
+In client mode, step function bodies are preserved as-is (allowing local testing/execution), and step functions have their `stepId` property set so they can be properly serialized when passed across boundaries (e.g., as arguments to `start()` or returned from other step functions). Workflow functions throw an error and have `workflowId` attached for use with `start()`.
 
-Input code
+Unlike step mode, client mode does **not** import `registerStepFunction` from `workflow/internal/private` because that module contains server-side dependencies. Instead, the `stepId` property is set directly on the function, similar to how `workflowId` is set on workflow functions.
 
-```
-// workflow/main.js
+Note: Step functions nested inside other functions (whether workflow functions or regular functions) do NOT get `stepId` assignments in client mode because they are not accessible at module level.
+
+### Step Functions
+
+Input:
+```javascript
 export async function add(a, b) {
   "use step";
   return a + b;
 }
-
-export async function workflow(a, b) {
-  "use workflow";
-  return add(a, b);
-}
 ```
 
-Output code
-
-```
-// workflow/main.js
-import { runStep as __private_run_step } from "workflow/api"
-
+Output:
+```javascript
+/**__internal_workflows{"steps":{"input.js":{"add":{"stepId":"step//./input//add"}}}}*/;
 export async function add(a, b) {
-  return __private_run_step('add', { arguments: [a, b] })
+    return a + b;
 }
-
-export async function workflow(a, b) {
-  throw new Error("You attempted to execute workflow workflow function directly. To start a workflow, use start(workflow) from workflow/api");
-}
-workflow.workflowId = "workflow//workflow/main.js//workflow";
+add.stepId = "step//./input//add";
 ```
 
-**ID Generation:**
+### Workflow Functions
 
-- Step functions use `runStep` with the function name (not the full ID)
-- Workflow functions throw an error if called directly and have the `workflowId` property attached using the format `workflow//{filepath}//{functionName}`
+Input:
+```javascript
+export async function myWorkflow(data) {
+  "use workflow";
+  return await processData(data);
+}
+```
 
-Upstream, this mode is typically used by a framework loader (like a Next.js/webpack loader) to JIT transform workflow executions into proxied calls.
+Output:
+```javascript
+/**__internal_workflows{"workflows":{"input.js":{"myWorkflow":{"workflowId":"workflow//./input//myWorkflow"}}}}*/;
+export async function myWorkflow(data) {
+    throw new Error("You attempted to execute workflow myWorkflow function directly. To start a workflow, use start(myWorkflow) from workflow/api");
+}
+myWorkflow.workflowId = "workflow//./input//myWorkflow";
+```
+
+### Custom Serialization in Client Mode
+
+Classes with custom serialization methods are also registered in client mode so that they can be properly serialized when passed to `start(workflow)`:
+
+Input:
+```javascript
+export class Point {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+  }
+
+  static [Symbol.for("workflow-serialize")](instance) {
+    return { x: instance.x, y: instance.y };
+  }
+
+  static [Symbol.for("workflow-deserialize")](data) {
+    return new Point(data.x, data.y);
+  }
+}
+```
+
+Output (Client Mode):
+```javascript
+import { registerSerializationClass } from "workflow/internal/class-serialization";
+/**__internal_workflows{"classes":{"input.js":{"Point":{"classId":"class//./input//Point"}}}}*/;
+export class Point {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+    }
+    static [Symbol.for("workflow-serialize")](instance) {
+        return { x: instance.x, y: instance.y };
+    }
+    static [Symbol.for("workflow-deserialize")](data) {
+        return new Point(data.x, data.y);
+    }
+}
+registerSerializationClass("class//./input//Point", Point);
+```
+
+---
+
+## Static Methods
+
+Static class methods can be marked with directives. Instance methods are **not supported**.
+
+### Static Step Method
+
+Input:
+```javascript
+export class MyService {
+  static async process(data) {
+    "use step";
+    return data.value * 2;
+  }
+}
+```
+
+Output (Step Mode):
+```javascript
+import { registerStepFunction } from "workflow/internal/private";
+import { registerSerializationClass } from "workflow/internal/class-serialization";
+/**__internal_workflows{"steps":{"input.js":{"MyService.process":{"stepId":"step//./input//MyService.process"}}},"classes":{"input.js":{"MyService":{"classId":"class//./input//MyService"}}}}*/;
+export class MyService {
+    static async process(data) {
+        return data.value * 2;
+    }
+}
+registerStepFunction("step//./input//MyService.process", MyService.process);
+registerSerializationClass("class//./input//MyService", MyService);
+```
+
+Output (Workflow Mode):
+```javascript
+import { registerSerializationClass } from "workflow/internal/class-serialization";
+/**__internal_workflows{"steps":{"input.js":{"MyService.process":{"stepId":"step//./input//MyService.process"}}},"classes":{"input.js":{"MyService":{"classId":"class//./input//MyService"}}}}*/;
+export class MyService {
+}
+MyService.process = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step//./input//MyService.process");
+registerSerializationClass("class//./input//MyService", MyService);
+```
+
+### Static Workflow Method
+
+Input:
+```javascript
+export class JobRunner {
+  static async runJob(jobId) {
+    "use workflow";
+    return await processJob(jobId);
+  }
+}
+```
+
+Output (Workflow Mode):
+```javascript
+/**__internal_workflows{"workflows":{"input.js":{"JobRunner.runJob":{"workflowId":"workflow//./input//JobRunner.runJob"}}}}*/;
+export class JobRunner {
+    static async runJob(jobId) {
+        return await processJob(jobId);
+    }
+}
+JobRunner.runJob.workflowId = "workflow//./input//JobRunner.runJob";
+globalThis.__private_workflows.set("workflow//./input//JobRunner.runJob", JobRunner.runJob);
+```
+
+---
+
+## Custom Serialization
+
+Classes can define custom serialization/deserialization using symbols. These are automatically registered for use across workflow boundaries.
+
+Input:
+```javascript
+export class Point {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+  }
+
+  static [Symbol.for("workflow-serialize")](instance) {
+    return { x: instance.x, y: instance.y };
+  }
+
+  static [Symbol.for("workflow-deserialize")](data) {
+    return new Point(data.x, data.y);
+  }
+}
+```
+
+Output:
+```javascript
+import { registerSerializationClass } from "workflow/internal/class-serialization";
+/**__internal_workflows{"classes":{"input.js":{"Point":{"classId":"class//./input//Point"}}}}*/;
+export class Point {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+    }
+    static [Symbol.for("workflow-serialize")](instance) {
+        return { x: instance.x, y: instance.y };
+    }
+    static [Symbol.for("workflow-deserialize")](data) {
+        return new Point(data.x, data.y);
+    }
+}
+registerSerializationClass("class//./input//Point", Point);
+```
+
+You can also use imported symbols from `@workflow/serde`:
+
+```javascript
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from "@workflow/serde";
+
+export class Vector {
+  static [WORKFLOW_SERIALIZE](instance) { ... }
+  static [WORKFLOW_DESERIALIZE](data) { ... }
+}
+```
+
+### Class Expressions with Binding Names
+
+When a class expression is assigned to a variable, the plugin uses the variable name (binding name) for registration, not the internal class name. This is important because the internal class name is only accessible inside the class body.
+
+Input:
+```javascript
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from "@workflow/serde";
+
+var Bash = class _Bash {
+  constructor(command) {
+    this.command = command;
+  }
+
+  static [WORKFLOW_SERIALIZE](instance) {
+    return { command: instance.command };
+  }
+
+  static [WORKFLOW_DESERIALIZE](data) {
+    return new Bash(data.command);
+  }
+};
+```
+
+Output:
+```javascript
+import { registerSerializationClass } from "workflow/internal/class-serialization";
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from "@workflow/serde";
+/**__internal_workflows{"classes":{"input.js":{"Bash":{"classId":"class//./input//Bash"}}}}*/;
+var Bash = class _Bash {
+    constructor(command) {
+        this.command = command;
+    }
+    static [WORKFLOW_SERIALIZE](instance) {
+        return { command: instance.command };
+    }
+    static [WORKFLOW_DESERIALIZE](data) {
+        return new Bash(data.command);
+    }
+};
+registerSerializationClass("class//./input//Bash", Bash);
+```
+
+Note that:
+- The registration uses `Bash` (the variable name), not `_Bash` (the internal class name)
+- The `classId` in the manifest also uses `Bash`
+- This ensures the registration call references a symbol that's actually in scope at module level
+
+### Anonymous Class Expression Name Re-insertion
+
+When a serializable class expression has no internal name (anonymous) but has a binding name from a variable declaration, the plugin re-inserts the binding name as the class expression's identifier. This handles the common case where upstream bundlers like esbuild/tsup transform `class Foo { ... }` into `var Foo = class { ... }` (stripping the class name).
+
+Without this fix, the anonymous class would have an empty `.name` property, which can break downstream bundlers that rely on the class name for serialization registration.
+
+Input (e.g., after tsup pre-bundling):
+```javascript
+var Shell = class {
+  constructor(cmd) {
+    this.cmd = cmd;
+  }
+
+  static [Symbol.for('workflow-serialize')](instance) {
+    return { cmd: instance.cmd };
+  }
+
+  static [Symbol.for('workflow-deserialize')](data) {
+    return new Shell(data.cmd);
+  }
+};
+```
+
+Output:
+```javascript
+import { registerSerializationClass } from "workflow/internal/class-serialization";
+/**__internal_workflows{"classes":{"input.js":{"Shell":{"classId":"class//./input//Shell"}}}}*/;
+var Shell = class Shell {
+    constructor(cmd) {
+        this.cmd = cmd;
+    }
+    static [Symbol.for('workflow-serialize')](instance) {
+        return { cmd: instance.cmd };
+    }
+    static [Symbol.for('workflow-deserialize')](data) {
+        return new Shell(data.cmd);
+    }
+};
+registerSerializationClass("class//./input//Shell", Shell);
+```
+
+Note that:
+- The class expression `class { ... }` becomes `class Shell { ... }` — the binding name is inserted
+- For typical usage, behavior is preserved while ensuring the `.name` property survives subsequent bundling (an inner class name binding is introduced, which can differ in edge cases that depend on assigning to or shadowing that name inside the class body)
+- Classes that already have an internal name (e.g., `class _Bash { ... }`) are not modified
+- Only classes with serialization methods (`WORKFLOW_SERIALIZE` and `WORKFLOW_DESERIALIZE`) are affected
+
+### File Discovery for Custom Serialization
+
+Files containing classes with custom serialization are automatically discovered for transformation, even if they don't contain `"use step"` or `"use workflow"` directives. The discovery mechanism looks for:
+
+1. **Imports from `@workflow/serde`**: Files that import `WORKFLOW_SERIALIZE` or `WORKFLOW_DESERIALIZE` from `@workflow/serde`
+2. **Direct Symbol.for usage**: Files containing `Symbol.for('workflow-serialize')` or `Symbol.for('workflow-deserialize')`
+
+This allows serialization classes to be defined in separate files (such as Next.js API routes or utility modules) and still be registered in the serialization system when the application is built.
+
+### Cross-Context Class Registration
+
+Classes with custom serialization are automatically included in **all bundle contexts** (step, workflow, client) to ensure they can be properly serialized and deserialized when crossing execution boundaries:
+
+| Boundary | Serializer | Deserializer | Example |
+|----------|------------|--------------|---------|
+| Client → Workflow | Client mode | Workflow mode | Passing a `Point` instance to `start(workflow)` |
+| Workflow → Step | Workflow mode | Step mode | Passing a `Point` instance as step argument |
+| Step → Workflow | Step mode | Workflow mode | Returning a `Point` instance from a step |
+| Workflow → Client | Workflow mode | Client mode | Returning a `Point` instance from a workflow |
+
+The build system automatically discovers all files containing serializable classes and includes them in each bundle, regardless of where the class is originally defined. This ensures the class registry has all necessary classes for any serialization boundary the data may cross.
+
+For example, if a class `Point` is defined in `models/point.ts` and only used in step code:
+- The **step bundle** includes `Point` because the step file imports it
+- The **workflow bundle** also includes `Point` so it can deserialize step return values
+- The **client bundle** also includes `Point` so it can deserialize workflow return values
+
+This cross-registration happens automatically during the build process - no manual configuration is required.
+
+---
+
+## Default Exports
+
+Anonymous default exports are given the name `__default`:
+
+Input:
+```javascript
+export default async (data) => {
+  "use workflow";
+  return await process(data);
+};
+```
+
+Output (Workflow Mode):
+```javascript
+/**__internal_workflows{"workflows":{"input.js":{"default":{"workflowId":"workflow//./input//default"}}}}*/;
+const __default = async (data) => {
+    return await process(data);
+};
+__default.workflowId = "workflow//./input//default";
+globalThis.__private_workflows.set("workflow//./input//default", __default);
+export default __default;
+```
+
+---
+
+## Validation Errors
+
+The plugin emits errors for invalid usage:
+
+| Error | Description |
+|-------|-------------|
+| Non-async function | Functions with `"use step"` or `"use workflow"` must be async |
+| Instance methods with `"use workflow"` | Only static methods can have `"use workflow"` (not instance methods) |
+| Misplaced directive | Directive must be at top of file or start of function body |
+| Conflicting directives | Cannot have both `"use step"` and `"use workflow"` at module level |
+| Invalid exports | Module-level directive files can only export async functions |
+| Misspelled directive | Detects typos like `"use steps"` or `"use workflows"` |
+
+---
+
+## Supported Function Forms
+
+The plugin supports various function declaration styles:
+
+- `async function name() { "use step"; }` - Function declaration
+- `const name = async () => { "use step"; }` - Arrow function with const
+- `let name = async () => { "use step"; }` - Arrow function with let
+- `var name = async () => { "use step"; }` - Arrow function with var
+- `const name = async function() { "use step"; }` - Function expression
+- `{ async method() { "use step"; } }` - Object method
+- `{ nested: { execute: async () => { "use step"; } } }` - Nested object property
+- `static async method() { "use step"; }` - Static class method
+- `async method() { "use step"; }` - Instance class method (requires custom serialization)
+
+---
+
+## Parameter Handling
+
+The plugin supports complex parameter patterns including:
+
+- Object destructuring: `async function({ a, b }) { "use step"; }`
+- Array destructuring: `async function([first, second]) { "use step"; }`
+- Default values: `async function({ x = 10 }) { "use step"; }`
+- Rest parameters: `async function(a, ...rest) { "use step"; }`
+- Nested destructuring: `async function({ user: { name } }) { "use step"; }`
+
+---
+
+## Disposable Resources (`using` declarations)
+
+The plugin supports directives inside functions that use TypeScript's `using` declarations (disposable resources). When TypeScript transforms `using` declarations, it wraps the function body in a try-catch-finally block:
+
+Original TypeScript:
+```typescript
+async function testStep() {
+  'use step';
+  using writer = getWriter(getWritable());
+  await writer.write('Hello, world!');
+}
+```
+
+After TypeScript transformation:
+```javascript
+async function testStep() {
+  const env = {
+    stack: [],
+    error: void 0,
+    hasError: false
+  };
+  try {
+    "use step";  // Directive is now inside try block
+    const writer = _ts_add_disposable_resource(env, getWriter(getWritable()), false);
+    await writer.write("Hello, world!");
+  } catch (e) {
+    env.error = e;
+    env.hasError = true;
+  } finally {
+    _ts_dispose_resources(env);
+  }
+}
+```
+
+The plugin detects this pattern and correctly identifies the directive inside the try block, removing it during transformation while preserving the disposable resource handling.
+
+---
 
 ## Notes
 
-- Instead of individually marking functions with 'use step' or 'use_workflow', you can also add the directive to the top of a file to mark all exports within that file as step functions or workflows
-- the directives must be at the very beginning of their function or module; above any other code including imports (comments above directives are OK). They must be written with single or double quotes, not backticks.
-- The arguments and return value of 'use step' and 'use workflow' must be serializable.
-- Because the underlying network calls are always asynchronous, 'use step' and 'use workflow' can only be used on async functions.
+- Arguments and return values must be serializable (JSON-compatible or using custom serialization)
+- The `this` keyword and `arguments` object are not allowed in step functions
+- `super` calls are not allowed in step functions
+- Imports from the module are excluded from closure variable detection
+- Workflow functions always throw when called directly; use `start(workflow)` from `workflow/api` instead

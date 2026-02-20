@@ -2,12 +2,12 @@ import { runInContext } from 'node:vm';
 import { ERROR_SLUGS, WorkflowRuntimeError } from '@workflow/errors';
 import { withResolvers } from '@workflow/utils';
 import { getPort } from '@workflow/utils/get-port';
+import { parseWorkflowName } from '@workflow/utils/parse-name';
 import type { Event, WorkflowRun } from '@workflow/world';
 import * as nanoid from 'nanoid';
 import { monotonicFactory } from 'ulid';
 import { EventConsumerResult, EventsConsumer } from './events-consumer.js';
 import { ENOTSUP } from './global.js';
-import { parseWorkflowName } from './parse-name.js';
 import type { WorkflowOrchestratorContext } from './private.js';
 import {
   dehydrateWorkflowReturnValue,
@@ -34,9 +34,10 @@ import { createSleep } from './workflow/sleep.js';
 export async function runWorkflow(
   workflowCode: string,
   workflowRun: WorkflowRun,
-  events: Event[]
-): Promise<unknown> {
-  return trace(`WORKFLOW.run ${workflowRun.workflowName}`, async (span) => {
+  events: Event[],
+  encryptionKey: Uint8Array | undefined
+): Promise<Uint8Array | unknown> {
+  return trace(`workflow.run ${workflowRun.workflowName}`, async (span) => {
     span?.setAttributes({
       ...Attribute.WorkflowName(workflowRun.workflowName),
       ...Attribute.WorkflowRunId(workflowRun.runId),
@@ -71,10 +72,23 @@ export async function runWorkflow(
       new Uint8Array(size).map(() => 256 * vmGlobalThis.Math.random())
     );
 
+    const eventsConsumer = new EventsConsumer(events, {
+      onUnconsumedEvent: (event) => {
+        workflowDiscontinuation.reject(
+          new WorkflowRuntimeError(
+            `Unconsumed event in event log: eventType=${event.eventType}, correlationId=${event.correlationId}, eventId=${event.eventId}. This indicates a corrupted or invalid event log.`,
+            { slug: ERROR_SLUGS.CORRUPTED_EVENT_LOG }
+          )
+        );
+      },
+    });
+
     const workflowContext: WorkflowOrchestratorContext = {
+      runId: workflowRun.runId,
+      encryptionKey,
       globalThis: vmGlobalThis,
       onWorkflowError: workflowDiscontinuation.reject,
-      eventsConsumer: new EventsConsumer(events),
+      eventsConsumer,
       generateUlid: () => ulid(+startedAt),
       generateNanoid,
       invocationsQueue: new Map(),
@@ -87,6 +101,27 @@ export async function runWorkflow(
         updateTimestamp(+createdAt);
       }
       // Never consume events - this is only a passive subscriber
+      return EventConsumerResult.NotConsumed;
+    });
+
+    // Consume run lifecycle events - these are structural events that don't
+    // need special handling in the workflow, but must be consumed to advance
+    // past them in the event log
+    workflowContext.eventsConsumer.subscribe((event) => {
+      if (!event) {
+        return EventConsumerResult.NotConsumed;
+      }
+
+      // Consume run_created - every run has exactly one
+      if (event.eventType === 'run_created') {
+        return EventConsumerResult.Consumed;
+      }
+
+      // Consume run_started - every run has exactly one
+      if (event.eventType === 'run_started') {
+        return EventConsumerResult.Consumed;
+      }
+
       return EventConsumerResult.NotConsumed;
     });
 
@@ -587,7 +622,7 @@ export async function runWorkflow(
     // The filename parameter ensures stack traces show a meaningful name
     // (e.g., "example/workflows/99_e2e.ts") instead of "evalmachine.<anonymous>".
     const parsedName = parseWorkflowName(workflowRun.workflowName);
-    const filename = parsedName?.path || workflowRun.workflowName;
+    const filename = parsedName?.moduleSpecifier || workflowRun.workflowName;
 
     const workflowFn = runInContext(
       `${workflowCode}; globalThis.__private_workflows?.get(${JSON.stringify(workflowRun.workflowName)})`,
@@ -603,7 +638,12 @@ export async function runWorkflow(
       );
     }
 
-    const args = hydrateWorkflowArguments(workflowRun.input, vmGlobalThis);
+    const args = await hydrateWorkflowArguments(
+      workflowRun.input,
+      workflowRun.runId,
+      encryptionKey,
+      vmGlobalThis
+    );
 
     span?.setAttributes({
       ...Attribute.WorkflowArgumentsCount(args.length),
@@ -615,7 +655,12 @@ export async function runWorkflow(
       workflowDiscontinuation.promise,
     ]);
 
-    const dehydrated = dehydrateWorkflowReturnValue(result, vmGlobalThis);
+    const dehydrated = await dehydrateWorkflowReturnValue(
+      result,
+      workflowRun.runId,
+      encryptionKey,
+      vmGlobalThis
+    );
 
     span?.setAttributes({
       ...Attribute.WorkflowResultType(typeof result),

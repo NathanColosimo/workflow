@@ -1,12 +1,16 @@
 {
   "name": "@workflow/next",
-  "version": "4.0.1-beta.44",
+  "version": "4.0.1-beta.54",
   "description": "Next.js integration for Workflow DevKit",
   "type": "commonjs",
   "main": "dist/index.js",
   "files": [
-    "dist"
+    "dist",
+    "docs/**/*"
   ],
+  "directories": {
+    "doc": "./docs"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -24,7 +28,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "clean": "tsc --build --clean && rm -rf dist"
+    "clean": "tsc --build --clean && rm -rf dist docs",
+    "prepack": "mkdir -p docs && cp ../../docs/content/docs/getting-started/next.mdx ./docs/ && cp -r ../../docs/content/docs/api-reference/workflow-next ./docs/api-reference",
+    "postpack": "rm -rf docs"
   },
   "dependencies": {
     "@swc/core": "catalog:",
@@ -35,11 +41,11 @@
     "watchpack": "2.4.4"
   },
   "devDependencies": {
-    "@workflow/tsconfig": "workspace:*",
     "@types/node": "catalog:",
     "@types/semver": "7.7.1",
     "@types/watchpack": "2.4.4",
-    "next": "16.0.10"
+    "@workflow/tsconfig": "workspace:*",
+    "next": "16.1.6"
   },
   "peerDependencies": {
     "next": ">13"

@@ -1,5 +1,6 @@
+import { ERROR_SLUGS, WorkflowRuntimeError } from '@workflow/errors';
 import { type PromiseWithResolvers, withResolvers } from '@workflow/utils';
-import type { HookReceivedEvent } from '@workflow/world';
+import type { HookConflictEvent, HookReceivedEvent } from '@workflow/world';
 import type { Hook, HookOptions } from '../create-hook.js';
 import { EventConsumerResult } from '../events-consumer.js';
 import { WorkflowSuspension } from '../global.js';
@@ -29,6 +30,10 @@ export function createCreateHook(ctx: WorkflowOrchestratorContext) {
 
     let eventLogEmpty = false;
 
+    // Track if we have a conflict so we can reject future awaits
+    let hasConflict = false;
+    let conflictErrorRef: WorkflowRuntimeError | null = null;
+
     webhookLogger.debug('Hook consumer setup', { correlationId, token });
     ctx.eventsConsumer.subscribe((event) => {
       // If there are no events and there are promises waiting,
@@ -43,33 +48,64 @@ export function createCreateHook(ctx: WorkflowOrchestratorContext) {
               new WorkflowSuspension(ctx.invocationsQueue, ctx.globalThis)
             );
           }, 0);
-          return EventConsumerResult.Finished;
         }
+        return EventConsumerResult.NotConsumed;
+      }
+
+      if (event.correlationId !== correlationId) {
+        // We're not interested in this event - the correlationId belongs to a different entity
+        return EventConsumerResult.NotConsumed;
       }
 
       // Check for hook_created event to remove this hook from the queue if it was already created
-      if (
-        event?.eventType === 'hook_created' &&
-        event.correlationId === correlationId
-      ) {
+      if (event.eventType === 'hook_created') {
         // Remove this hook from the invocations queue (O(1) delete using Map)
         ctx.invocationsQueue.delete(correlationId);
         return EventConsumerResult.Consumed;
       }
 
-      if (
-        event?.eventType === 'hook_received' &&
-        event.correlationId === correlationId
-      ) {
+      // Handle hook_conflict event - another workflow is using this token
+      if (event.eventType === 'hook_conflict') {
+        // Remove this hook from the invocations queue
+        ctx.invocationsQueue.delete(correlationId);
+
+        // Store the conflict event so we can reject any awaited promises
+        const conflictEvent = event as HookConflictEvent;
+        const conflictError = new WorkflowRuntimeError(
+          `Hook token "${conflictEvent.eventData.token}" is already in use by another workflow`,
+          { slug: ERROR_SLUGS.HOOK_CONFLICT }
+        );
+
+        // Reject any pending promises
+        for (const resolver of promises) {
+          resolver.reject(conflictError);
+        }
+        promises.length = 0;
+
+        // Mark that we have a conflict so future awaits also reject
+        hasConflict = true;
+        conflictErrorRef = conflictError;
+
+        return EventConsumerResult.Consumed;
+      }
+
+      if (event.eventType === 'hook_received') {
         if (promises.length > 0) {
           const next = promises.shift();
           if (next) {
             // Reconstruct the payload from the event data
-            const payload = hydrateStepReturnValue(
+            hydrateStepReturnValue(
               event.eventData.payload,
+              ctx.runId,
+              ctx.encryptionKey,
               ctx.globalThis
-            );
-            next.resolve(payload);
+            )
+              .then((payload) => {
+                next.resolve(payload);
+              })
+              .catch((error) => {
+                next.reject(error);
+              });
           }
         } else {
           payloadsQueue.push(event);
@@ -78,20 +114,49 @@ export function createCreateHook(ctx: WorkflowOrchestratorContext) {
         return EventConsumerResult.Consumed;
       }
 
-      return EventConsumerResult.NotConsumed;
+      if (event.eventType === 'hook_disposed') {
+        // If a hook is explicitly disposed, we're done processing any more
+        // events for it
+        return EventConsumerResult.Finished;
+      }
+
+      // An unexpected event type has been received, this event log looks corrupted. Let's fail immediately.
+      setTimeout(() => {
+        ctx.onWorkflowError(
+          new WorkflowRuntimeError(
+            `Unexpected event type for hook ${correlationId} (token: ${token}) "${event.eventType}"`
+          )
+        );
+      }, 0);
+      return EventConsumerResult.Finished;
     });
 
     // Helper function to create a new promise that waits for the next hook payload
     function createHookPromise(): Promise<T> {
       const resolvers = withResolvers<T>();
+
+      // If we have a conflict, reject immediately
+      // This handles the iterator case where each await should reject
+      if (hasConflict && conflictErrorRef) {
+        resolvers.reject(conflictErrorRef);
+        return resolvers.promise;
+      }
+
       if (payloadsQueue.length > 0) {
         const nextPayload = payloadsQueue.shift();
         if (nextPayload) {
-          const payload = hydrateStepReturnValue(
+          hydrateStepReturnValue(
             nextPayload.eventData.payload,
+            ctx.runId,
+            ctx.encryptionKey,
             ctx.globalThis
-          );
-          resolvers.resolve(payload);
+          )
+            .then((payload) => {
+              resolvers.resolve(payload);
+            })
+            .catch((error) => {
+              resolvers.reject(error);
+            });
           return resolvers.promise;
         }
       }

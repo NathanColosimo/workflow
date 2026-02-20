@@ -1,5 +1,5 @@
 import { expect, test, vi } from 'vitest';
-import { hydrateWorkflowReturnValue } from 'workflow/internal/serialization';
+import { hydrateWorkflowReturnValue } from '@workflow/core/serialization';
 import { createFetcher, startServer } from './util.mjs';
 
 export function addition(world: string) {
@@ -14,10 +14,8 @@ export function addition(world: string) {
     const run = await vi.waitFor(
       async () => {
         const run = await server.getRun(result.runId);
-        expect(run).toMatchObject<Partial<typeof run>>({
-          status: 'completed',
-          output: [3],
-        });
+        expect(run.status).toBe('completed');
+        expect(run.output).toBeInstanceOf(Uint8Array);
         return run;
       },
       {
@@ -25,7 +23,11 @@ export function addition(world: string) {
         timeout: 10_000,
       }
     );
-    const output = await hydrateWorkflowReturnValue(run.output, [], run.runId);
+    const output = await hydrateWorkflowReturnValue(
+      run.output!,
+      run.runId,
+      undefined
+    );
     expect(output).toEqual(3);
   });
 }
