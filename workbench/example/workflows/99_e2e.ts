@@ -13,7 +13,7 @@ import {
   RetryableError,
   sleep,
 } from 'workflow';
-import { getRun, start } from 'workflow/api';
+import { getRun, resumeHook, start } from 'workflow/api';
 import { callThrower, stepThatThrowsFromHelper } from './helpers.js';
 
 //////////////////////////////////////////////////////////
@@ -1419,4 +1419,50 @@ export async function stepFunctionAsStartArgWorkflow(
   const doubled = await stepFn(directResult, directResult);
 
   return { directResult, viaStepResult, doubled };
+}
+
+//////////////////////////////////////////////////////////
+// Start from Workflow E2E Test
+//////////////////////////////////////////////////////////
+
+// Child workflow that processes a value and signals back to parent via hook
+export async function childWorkflowWithHookSignal(
+  hookToken: string,
+  value: number
+) {
+  'use workflow';
+  const result = await processAndSignalParent(hookToken, value);
+  return result;
+}
+
+async function processAndSignalParent(hookToken: string, value: number) {
+  'use step';
+  const processed = value * 3;
+  // Signal back to parent workflow via hook
+  await resumeHook(hookToken, { processed });
+  return { processed };
+}
+
+// Parent workflow that starts a child directly from workflow context
+export async function startFromWorkflow(inputValue: number) {
+  'use workflow';
+
+  // Create a hook to receive signal from child workflow
+  const hook = createHook<{ processed: number }>();
+
+  // Start child workflow directly from workflow context (new feature!)
+  // Pass the hook token so the child can signal back
+  const childRun = await start(childWorkflowWithHookSignal, [
+    hook.token,
+    inputValue,
+  ]);
+
+  // Wait for the child to signal back via hook
+  const signal = await hook;
+
+  return {
+    parentInput: inputValue,
+    childRunId: childRun.runId,
+    signalFromChild: signal,
+  };
 }
