@@ -1,17 +1,17 @@
 {
-  "lastUpdated": "2026-03-12T03:30:30.721Z",
-  "commit": "9c3213926fedd56cc53302780406958977e101f9",
+  "lastUpdated": "2026-03-12T20:00:02.116Z",
+  "commit": "3c3f80a1f0e00878bd6550a39af59e305c035706",
   "branch": "main",
   "type": "e2e",
   "worlds": {
     "mongodb": {
       "status": "partial",
       "total": 63,
-      "passed": 55,
-      "failed": 3,
+      "passed": 56,
+      "failed": 2,
       "skipped": 5,
       "frameworks": {},
-      "progress": 87
+      "progress": 89
     },
     "redis": {
       "status": "partial",
@@ -33,17 +33,27 @@
     },
     "local": {
       "status": "passing",
-      "total": 1450,
-      "passed": 1279,
+      "total": 1566,
+      "passed": 1377,
       "failed": 0,
-      "skipped": 171,
+      "skipped": 189,
       "frameworks": {
+        "astro": {
+          "total": 116,
+          "passed": 98,
+          "failed": 0
+        },
         "express": {
           "total": 116,
           "passed": 98,
           "failed": 0
         },
         "fastify": {
+          "total": 116,
+          "passed": 98,
+          "failed": 0
+        },
+        "hono": {
           "total": 116,
           "passed": 98,
           "failed": 0
@@ -77,25 +87,15 @@
           "total": 116,
           "passed": 98,
           "failed": 0
-        },
-        "astro": {
-          "total": 58,
-          "passed": 49,
-          "failed": 0
-        },
-        "hono": {
-          "total": 58,
-          "passed": 49,
-          "failed": 0
         }
       },
       "progress": 88
     },
     "postgres": {
-      "status": "passing",
+      "status": "partial",
       "total": 754,
-      "passed": 661,
-      "failed": 0,
+      "passed": 659,
+      "failed": 2,
       "skipped": 93,
       "frameworks": {
         "astro": {
@@ -120,8 +120,8 @@
         },
         "nextjs-turbopack": {
           "total": 116,
-          "passed": 110,
-          "failed": 0
+          "passed": 109,
+          "failed": 1
         },
         "nextjs-webpack": {
           "total": 116,
@@ -130,8 +130,8 @@
         },
         "nitro": {
           "total": 58,
-          "passed": 49,
-          "failed": 0
+          "passed": 48,
+          "failed": 1
         },
         "nuxt": {
           "total": 58,
@@ -149,7 +149,7 @@
           "failed": 0
         }
       },
-      "progress": 88
+      "progress": 87
     }
   }
 }
