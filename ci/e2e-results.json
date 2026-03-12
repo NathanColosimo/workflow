@@ -1,6 +1,6 @@
 {
-  "lastUpdated": "2026-03-11T18:34:13.278Z",
-  "commit": "d72c82220f0c56bb26edbc918e485b8bd14c959b",
+  "lastUpdated": "2026-03-12T03:30:30.721Z",
+  "commit": "9c3213926fedd56cc53302780406958977e101f9",
   "branch": "main",
   "type": "e2e",
   "worlds": {
@@ -33,27 +33,17 @@
     },
     "local": {
       "status": "passing",
-      "total": 1566,
-      "passed": 1377,
+      "total": 1450,
+      "passed": 1279,
       "failed": 0,
-      "skipped": 189,
+      "skipped": 171,
       "frameworks": {
-        "astro": {
-          "total": 116,
-          "passed": 98,
-          "failed": 0
-        },
         "express": {
           "total": 116,
           "passed": 98,
           "failed": 0
         },
         "fastify": {
-          "total": 116,
-          "passed": 98,
-          "failed": 0
-        },
-        "hono": {
           "total": 116,
           "passed": 98,
           "failed": 0
@@ -86,6 +76,16 @@
         "vite": {
           "total": 116,
           "passed": 98,
+          "failed": 0
+        },
+        "astro": {
+          "total": 58,
+          "passed": 49,
+          "failed": 0
+        },
+        "hono": {
+          "total": 58,
+          "passed": 49,
           "failed": 0
         }
       },
